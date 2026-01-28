@@ -17,8 +17,7 @@ import hmac
 import struct
 import ast
 import operator
-
-from sympy.utilities.decorator import deprecated
+from datetime import date, datetime
 
 
 # 自定义异常类
@@ -60,11 +59,9 @@ USER_AGENT = (
 
 # 时间配置 (秒)
 LOGIN_MAX_RETRY_COUNT = 3
-WAITING_TIME_OF_PIN = 30
 HTTP_TIMEOUT_SECONDS = 30
 RETRY_DELAY_SECONDS = 5
 API_TIMEOUT_SECONDS = 20
-POST_RENEWAL_CHECK_DELAY = 15
 EMAIL_CHECK_INTERVAL = 10
 EMAIL_MAX_RETRIES = 3
 
@@ -165,10 +162,19 @@ class RenewalBot:
     # ==================== 日志相关 ====================
 
     def log(self, info: str, level: LogLevel = LogLevel.INFO) -> None:
-        """记录日志消息到实例日志列表。"""
-        formatted = f"{level.value} {info}" if level != LogLevel.INFO else info
-        print(formatted)
-        self.log_messages.append(formatted)
+        """记录日志消息到实例日志列表，带时间戳。"""
+        # 获取当前时间，格式：2023-10-27 10:30:05
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 处理消息内容（保留原来的 Emoji 逻辑）
+        content = f"{level.value} {info}" if level != LogLevel.INFO else info
+
+        # 组合最终的日志行：[时间] 内容
+        formatted_line = f"[{timestamp}] {content}"
+
+        # 打印并保存
+        print(formatted_line)
+        self.log_messages.append(formatted_line)
 
     # ==================== 配置验证 ====================
 
@@ -472,7 +478,7 @@ class RenewalBot:
             f = self._handle_2fa_email(EUSERV_BASE_URL, headers, f.text)
             if f is None:
                 return None
-        # 处理2FA
+        # 处理增强2FA
         elif TWO_FA_PROMPT in f.text:
             f = self._handle_2fa(EUSERV_BASE_URL, headers, f.text)
             if f is None:
@@ -617,7 +623,7 @@ class RenewalBot:
                 self.log(f"为服务器 {server['id']} 续期时发生严重错误: {e}", LogLevel.ERROR)
                 all_success = False
         return all_success
-    
+
     # ==================== 续期后检查 ====================
 
     def _output_next_schedule(self, date_str: str) -> None:
