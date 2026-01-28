@@ -437,7 +437,7 @@ class RenewalBot:
             if f is None:
                 return None
         # 处理2FA
-        if TWO_FA_PROMPT in f.text:
+        elif TWO_FA_PROMPT in f.text:
             f = self._handle_2fa(EUSERV_BASE_URL, headers, f.text)
             if f is None:
                 return None
@@ -546,7 +546,7 @@ class RenewalBot:
             "prefix": "kc2_customer_contract_details_extend_contract_", "type": "1",
         }
         self.session.post(url, headers=headers, data=data2, timeout=HTTP_TIMEOUT_SECONDS)
-        time.sleep(WAITING_TIME_OF_PIN)
+        # time.sleep(WAITING_TIME_OF_PIN)
         pin = self._get_pin_from_gmail()
         data3 = {
             "auth": pin, "sess_id": self.sess_id, "subaction": "kc2_security_password_get_token",
