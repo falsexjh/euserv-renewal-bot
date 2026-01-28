@@ -18,6 +18,8 @@ import struct
 import ast
 import operator
 
+from sympy.utilities.decorator import deprecated
+
 
 # 自定义异常类
 class CaptchaError(Exception):
@@ -353,6 +355,40 @@ class RenewalBot:
         self.log("图片验证码验证通过")
         return response
 
+    def _handle_2fa_email(self, url: str, headers: dict, response_text: str) -> requests.Response | None:
+        """处理【邮箱 PIN】2FA 验证"""
+        self.log("检测到邮箱 PIN 二次验证")
+
+        try:
+            pin = self._get_pin_from_gmail()
+            self.log(f"成功获取邮箱 PIN: {pin}")
+        except PinRetrievalError as e:
+            self.log(f"获取邮箱 PIN 失败: {e}", LogLevel.ERROR)
+            return None
+
+        soup = BeautifulSoup(response_text, "html.parser")
+
+        # 提取隐藏字段（非常关键）
+        hidden_inputs = soup.find_all("input", type="hidden")
+        two_fa_data = {inp.get("name"): inp.get("value", "") for inp in hidden_inputs if inp.get("name")}
+
+        # ⚠️ Euserv 这里字段名就是 pin
+        two_fa_data["pin"] = pin
+
+        response = self.session.post(
+            url,
+            headers=headers,
+            data=two_fa_data,
+            timeout=HTTP_TIMEOUT_SECONDS
+        )
+
+        if "Error: This PIN is invalid." in response.text:
+            self.log("邮箱 PIN 验证失败", LogLevel.ERROR)
+            return None
+
+        self.log("邮箱 PIN 验证通过", LogLevel.SUCCESS)
+        return response
+
     def _handle_2fa(self, url: str, headers: dict, response_text: str) -> requests.Response | None:
         """处理2FA验证，返回更新后的响应"""
         self.log("检测到需要2FA验证")
@@ -568,21 +604,21 @@ class RenewalBot:
         final_res.raise_for_status()
         return True
 
+    def _process_server_renewals(self, servers_to_renew: list) -> bool:
+        """处理服务器续期，返回是否全部成功。"""
+        self.log(f"🔍 检测到 {len(servers_to_renew)} 台服务器需要续期: {[s['id'] for s in servers_to_renew]}")
+        all_success = True
+        for server in servers_to_renew:
+            self.log(f"\n🔄 --- 正在为服务器 {server['id']} 执行续期 ---")
+            try:
+                self._renew(server['id'])
+                self.log(f"服务器 {server['id']} 的续期流程已成功提交。", LogLevel.SUCCESS)
+            except (RenewalError, requests.RequestException) as e:
+                self.log(f"为服务器 {server['id']} 续期时发生严重错误: {e}", LogLevel.ERROR)
+                all_success = False
+        return all_success
+    
     # ==================== 续期后检查 ====================
-
-    def _log_non_renewable_servers(self, all_servers: list) -> None:
-        """记录无需续期的服务器信息并输出下次续约日期。"""
-        self.log("检测到所有服务器均无需续期。详情如下：", LogLevel.SUCCESS)
-        earliest_date = None
-        for server in all_servers:
-            if not server["renewable"]:
-                self.log(f"   - 服务器 {server['id']}: 可续约日期为 {server['date']}")
-                if server['date'] and server['date'] != "未知日期":
-                    if earliest_date is None or server['date'] < earliest_date:
-                        earliest_date = server['date']
-
-        if earliest_date and GITHUB_OUTPUT:
-            self._output_next_schedule(earliest_date)
 
     def _output_next_schedule(self, date_str: str) -> None:
         """输出下次续约日期的 cron 表达式到 GITHUB_OUTPUT。"""
@@ -599,33 +635,6 @@ class RenewalBot:
                     f.write(f"next_date={date_str}\n")
         except (ValueError, OSError) as e:
             self.log(f"解析续约日期失败: {e}", LogLevel.WARNING)
-
-    def _process_server_renewals(self, servers_to_renew: list) -> bool:
-        """处理服务器续期，返回是否全部成功。"""
-        self.log(f"🔍 检测到 {len(servers_to_renew)} 台服务器需要续期: {[s['id'] for s in servers_to_renew]}")
-        all_success = True
-        for server in servers_to_renew:
-            self.log(f"\n🔄 --- 正在为服务器 {server['id']} 执行续期 ---")
-            try:
-                self._renew(server['id'])
-                self.log(f"服务器 {server['id']} 的续期流程已成功提交。", LogLevel.SUCCESS)
-            except (RenewalError, requests.RequestException) as e:
-                self.log(f"为服务器 {server['id']} 续期时发生严重错误: {e}", LogLevel.ERROR)
-                all_success = False
-        return all_success
-
-    def _check_post_renewal_status(self) -> None:
-        """检查续期后的服务器状态，并显示下次续约日期。"""
-        time.sleep(POST_RENEWAL_CHECK_DELAY)
-        server_list = self._fetch_server_list_with_retry()
-        servers_still_to_renew = [sv["id"] for sv in server_list if sv["renewable"]]
-
-        if servers_still_to_renew:
-            for server_id in servers_still_to_renew:
-                self.log(f"警告: 服务器 {server_id} 在续期操作后仍显示为可续约状态。", LogLevel.WARNING)
-        else:
-            self.log("所有服务器均已成功续订或无需续订！", LogLevel.CELEBRATION)
-            self._display_next_renewal_dates(server_list)
 
     def _fetch_server_list_with_retry(self) -> list[dict]:
         """
@@ -662,109 +671,104 @@ class RenewalBot:
 
         return server_list
 
-    def _display_next_renewal_dates(self, server_list: list[dict]) -> None:
-        """显示每台服务器的下次续约日期并输出最早日期。"""
-        earliest_date = None
-        for server in server_list:
-            if server['date'] and server['date'] != "未知日期":
-                self.log(f"   - 服务器 {server['id']}: 下次可续约日期 {server['date']}")
-                if earliest_date is None or server['date'] < earliest_date:
-                    earliest_date = server['date']
+    def _finalize_report_and_schedule(self, server_list: list[dict]) -> None:
+        """
+        统一的收尾逻辑：
+        1. 检查是否有服务器仍处于“可续期”状态（异常检测）。
+        2. 打印每台服务器的下次续约日期。
+        3. 计算最早的续约日期并更新 Cron。
+        """
+        self.log("\n📊 --- 最终状态报告 ---")
 
+        earliest_date = None
+        all_clear = True
+
+        for server in server_list:
+            status_icon = "✅"
+            status_text = "无需续期"
+
+            # 异常检查：如果理应续期完成，但状态仍是 True，说明有问题
+            if server['renewable']:
+                status_icon = "⚠️"
+                status_text = "仍需续期 (操作可能未生效)"
+                all_clear = False
+
+            date_str = server.get('date', '未知日期')
+            self.log(f"   - 服务器 {server['id']}: {status_icon} {status_text} | 下次窗口: {date_str}")
+
+            # 寻找最早日期用于 Cron
+            if date_str and date_str != "未知日期":
+                if earliest_date is None or date_str < earliest_date:
+                    earliest_date = date_str
+
+        if all_clear:
+            self.log("✨ 所有服务器状态正常。", LogLevel.SUCCESS)
+        else:
+            self.log("部分服务器状态异常，请检查日志。", LogLevel.WARNING)
+
+        # 更新 GitHub Action Cron
         if earliest_date:
-            self.log(f"📅 下次续约窗口开启时间: {earliest_date}", LogLevel.INFO)
+            self.log(f"📅 检测到最早续约窗口: {earliest_date}", LogLevel.INFO)
             if GITHUB_OUTPUT:
                 self._output_next_schedule(earliest_date)
+        else:
+            self.log("❓ 未能获取有效的下次续约日期，无法更新 Cron。", LogLevel.WARNING)
 
     # ==================== 主入口 ====================
 
     def run(self) -> int:
-        """执行续期任务的主入口。
-
-        Returns:
-            EXIT_SUCCESS (0): 续约成功或无需续约
-            EXIT_FAILURE (1): 续约失败
-            EXIT_SKIPPED (2): 未到续约日期
-        """
+        """执行续期任务的主入口。"""
         config_ok, missing = self.validate_config()
         if not config_ok:
             self.log(f"必要的配置未设置: {', '.join(missing)}", LogLevel.ERROR)
-            if self.log_messages:
-                self.send_status_email("配置错误")
             return EXIT_FAILURE
 
         status = "成功"
         exit_code = EXIT_SUCCESS
+
         try:
             self.log("--- 开始 Euserv 自动续期任务 ---")
-
-            # 预加载 OCR 模型，减少首次验证码识别延迟
             self.prewarm_ocr()
-
             self._perform_login()
 
-            all_servers = self._get_servers()
-            servers_to_renew = [server for server in all_servers if server["renewable"]]
+            # 1. 获取初始状态
+            current_server_list = self._get_servers()
+            servers_to_renew = [s for s in current_server_list if s["renewable"]]
 
-            if not all_servers:
-                self.log("未检测到任何服务器合同。", LogLevel.SUCCESS)
-            elif not servers_to_renew:
-                # 智能调度：未到续约日期，跳过执行
-                self._log_non_renewable_servers(all_servers)
-                self.log("ℹ️ 未到续约日期，跳过执行。", LogLevel.INFO)
-                return EXIT_SKIPPED
+            if not current_server_list:
+                self.log("未检测到任何服务器合同。", LogLevel.WARNING)
+                return EXIT_SUCCESS
+
+            # 2. 根据状态分支处理
+            if not servers_to_renew:
+                self.log("✅ 检测到所有服务器均无需续期，跳过执行。", LogLevel.INFO)
+                exit_code = EXIT_SKIPPED
+                # 数据源：直接使用 current_server_list，无需重新获取
             else:
+                # 执行续期逻辑
                 if not self._process_server_renewals(servers_to_renew):
-                    status = "失败"
+                    status = "部分失败"
                     exit_code = EXIT_FAILURE
 
-            self._check_post_renewal_status()
+                # 数据源：续期后状态已变，必须使用带重试的获取逻辑，等待日期刷新
+                # 注意：这里调用的是上一轮对话中修复过的 _fetch_server_list_with_retry
+                current_server_list = self._fetch_server_list_with_retry()
+
+            # 3. 统一收尾（合并后的逻辑）
+            # 无论上面走了哪个分支，这里都用最新的 current_server_list 更新报告和 Cron
+            self._finalize_report_and_schedule(current_server_list)
+
             self.log("\n🏁 --- 所有工作完成 ---")
 
         except (LoginError, RenewalError, PinRetrievalError, CaptchaError) as e:
             status = "失败"
             exit_code = EXIT_FAILURE
-            self.log(f"❗ 脚本执行过程中发生致命错误: {e}")
+            self.log(f"❗ 脚本执行过程中发生致命错误: {e}", LogLevel.ERROR)
         finally:
-            self._cleanup()  # 关闭 HTTP Session
+            self._cleanup()
             self.send_status_email(status)
 
         return exit_code
-
-    def _handle_2fa_email(self, url: str, headers: dict, response_text: str) -> requests.Response | None:
-        """处理【邮箱 PIN】2FA 验证"""
-        self.log("检测到邮箱 PIN 二次验证")
-
-        try:
-            pin = self._get_pin_from_gmail()
-            self.log(f"成功获取邮箱 PIN: {pin}")
-        except PinRetrievalError as e:
-            self.log(f"获取邮箱 PIN 失败: {e}", LogLevel.ERROR)
-            return None
-
-        soup = BeautifulSoup(response_text, "html.parser")
-
-        # 提取隐藏字段（非常关键）
-        hidden_inputs = soup.find_all("input", type="hidden")
-        two_fa_data = {inp.get("name"): inp.get("value", "") for inp in hidden_inputs if inp.get("name")}
-
-        # ⚠️ Euserv 这里字段名就是 pin
-        two_fa_data["pin"] = pin
-
-        response = self.session.post(
-            url,
-            headers=headers,
-            data=two_fa_data,
-            timeout=HTTP_TIMEOUT_SECONDS
-        )
-
-        if "Error: This PIN is invalid." in response.text:
-            self.log("邮箱 PIN 验证失败", LogLevel.ERROR)
-            return None
-
-        self.log("邮箱 PIN 验证通过", LogLevel.SUCCESS)
-        return response
-
 
 def main() -> None:
     """向后兼容的入口点，使用 RenewalBot 实例。"""
