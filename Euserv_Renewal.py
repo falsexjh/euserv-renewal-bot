@@ -628,13 +628,38 @@ class RenewalBot:
             self._display_next_renewal_dates(server_list)
 
     def _fetch_server_list_with_retry(self) -> list[dict]:
-        """获取服务器列表，如果没有日期则重试一次。"""
-        server_list = self._get_servers()
-        has_valid_date = any(s['date'] and s['date'] != "未知日期" for s in server_list)
-        if not has_valid_date:
-            self.log("首次读取未获取到续约日期，等待 30 秒后重试...")
-            time.sleep(30)
-            server_list = self._get_servers()
+        """
+        获取服务器列表，如果未获取到有效日期，则进行多次轮询重试。
+        Euserv 生成新日期通常需要 1-3 分钟。
+        """
+        max_retries = 5  # 最多重试 5 次
+        retry_interval = 30  # 每次间隔 30 秒
+        server_list = []  # <--- 【修复】在此处初始化变量，防止引用前未赋值错误
+
+        for i in range(max_retries + 1):
+            try:
+                server_list = self._get_servers()
+            except Exception as e:
+                self.log(f"获取服务器列表时出错 (尝试 {i + 1}): {e}", LogLevel.WARNING)
+                # 如果出错，保持 server_list 为空或上次的结果，继续重试
+
+            # 检查是否有任何服务器获取到了有效的未来日期
+            has_valid_date = any(s.get('date') and s['date'] != "未知日期" for s in server_list)
+
+            if has_valid_date:
+                if i > 0:
+                    self.log(f"✅ 在第 {i} 次重试后成功获取到续约日期。", LogLevel.SUCCESS)
+                return server_list
+
+            if i < max_retries:
+                self.log(
+                    f"⏳ 续约成功，但页面尚未更新下次续约日期。正在等待 Euserv 后端处理... ({i + 1}/{max_retries} 每次等待 {retry_interval}秒)",
+                    LogLevel.PROGRESS)
+                time.sleep(retry_interval)
+            else:
+                self.log("⚠️ 重试超时：Euserv 页面仍未显示下次续约日期。Cron 表达式本次无法更新，将依赖默认 Schedule。",
+                         LogLevel.WARNING)
+
         return server_list
 
     def _display_next_renewal_dates(self, server_list: list[dict]) -> None:
