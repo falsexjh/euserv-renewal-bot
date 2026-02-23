@@ -19,23 +19,28 @@ from datetime import date, datetime
 from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 
+
 # ==================== 自定义异常 ====================
 
 class CaptchaError(Exception):
     """验证码处理相关错误"""
     pass
 
+
 class PinRetrievalError(Exception):
     """PIN码获取相关错误"""
     pass
+
 
 class LoginError(Exception):
     """登录相关错误"""
     pass
 
+
 class RenewalError(Exception):
     """续期相关错误"""
     pass
+
 
 # ==================== 环境变量配置 ====================
 
@@ -164,7 +169,7 @@ class RenewalBot:
     def log(self, info: str, level: LogLevel = LogLevel.INFO) -> None:
         """记录日志消息到实例日志列表，带时间戳。"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # 如果是普通 INFO，只显示文字；否则显示 Emoji + 文字
         content = f"{level.value} {info}" if level != LogLevel.INFO else info
         formatted_line = f"[{timestamp}] {content}"
@@ -200,7 +205,7 @@ class RenewalBot:
         recipient = NOTIFICATION_EMAIL
         subject = f"Euserv 续约脚本运行报告 - {subject_status}"
         body = "Euserv 自动续约脚本本次运行的详细日志如下：\n\n" + "\n".join(self.log_messages)
-        
+
         msg = MIMEText(body, 'plain', 'utf-8')
         msg['Subject'] = subject
         msg['From'] = sender
@@ -329,7 +334,7 @@ class RenewalBot:
         image_bytes = image_resp.content
 
         captcha_code = self._solve_captcha(image_bytes)
-        
+
         post_data = {
             "email": username,
             "password": password,
@@ -348,7 +353,7 @@ class RenewalBot:
             except OSError:
                 pass
             return None
-            
+
         self.log("图片验证码验证通过", LogLevel.SUCCESS)
         return resp
 
@@ -393,11 +398,11 @@ class RenewalBot:
         two_fa_data["pin"] = two_fa_code
 
         resp = self.session.post(url, headers=headers, data=two_fa_data, timeout=HTTP_TIMEOUT_SECONDS)
-        
+
         if TWO_FA_PROMPT in resp.text:
             self.log("2FA 验证失败", LogLevel.ERROR)
             return None
-            
+
         self.log("2FA 验证通过", LogLevel.SUCCESS)
         return resp
 
@@ -447,7 +452,8 @@ class RenewalBot:
 
         # 验证码挑战
         if CAPTCHA_PROMPT in resp.text:
-            resp = self._handle_captcha(EUSERV_BASE_URL, EUSERV_CAPTCHA_URL, headers, sess_id, EUSERV_USERNAME, EUSERV_PASSWORD)
+            resp = self._handle_captcha(EUSERV_BASE_URL, EUSERV_CAPTCHA_URL, headers, sess_id, EUSERV_USERNAME,
+                                        EUSERV_PASSWORD)
             if resp is None: return None
 
         # 2FA 挑战
@@ -499,9 +505,9 @@ class RenewalBot:
         self.log("连接 Gmail 获取 PIN 码...", LogLevel.PROGRESS)
         today_str = date.today().strftime('%d-%b-%Y')
         search_criteria = f'(SINCE "{today_str}" FROM "no-reply@euserv.com" SUBJECT "EUserv - ")'
-        
+
         time.sleep(EMAIL_CHECK_INTERVAL)
-        
+
         for i in range(EMAIL_MAX_RETRIES):
             try:
                 with imaplib.IMAP4_SSL(EMAIL_HOST) as mail:
@@ -515,31 +521,32 @@ class RenewalBot:
             except (imaplib.IMAP4.error, OSError) as e:
                 self.log(f"IMAP 连接错误: {e}", LogLevel.ERROR)
                 raise PinRetrievalError(f"邮件连接错误: {e}") from e
-                
+
         raise PinRetrievalError("多次尝试后仍无法获取 PIN。")
 
     # ==================== 业务逻辑：获取与续期 ====================
 
-    def _get_servers(self) -> list[dict]:
+    def _get_servers(self,debug = False) -> list[dict]:
         """获取服务器列表状态"""
         self.log("正在拉取服务器列表...", LogLevel.PROGRESS)
         server_list = []
         url = f"{EUSERV_BASE_URL}?sess_id={self.sess_id}"
         headers = {"user-agent": USER_AGENT}
-        
+
         resp = self.session.get(url=url, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
         resp.raise_for_status()
-        
+        if debug:
+            self.log(f"DEBUG in _get_servers: {resp.text}")
         soup = BeautifulSoup(resp.text, "html.parser")
         selector = "#kc2_order_customer_orders_tab_content_1 .kc2_order_table.kc2_content_table tr, #kc2_order_customer_orders_tab_content_2 .kc2_order_table.kc2_content_table tr"
-        
+
         for tr in soup.select(selector):
             server_id_tag = tr.select_one(".td-z1-sp1-kc")
             if not server_id_tag: continue
-            
+
             server_id = server_id_tag.get_text(strip=True)
             action_container = tr.select_one(".td-z1-sp2-kc .kc2_order_action_container")
-            
+
             if action_container:
                 action_text = action_container.get_text()
                 if RENEWAL_DATE_PATTERN in action_text:
@@ -548,7 +555,7 @@ class RenewalBot:
                     server_list.append({"id": server_id, "renewable": False, "date": renewal_date})
                 else:
                     server_list.append({"id": server_id, "renewable": True, "date": None})
-                    
+
         return server_list
 
     def _renew(self, order_id: str) -> bool:
@@ -556,21 +563,21 @@ class RenewalBot:
         self.log(f"发起续约请求: {order_id}", LogLevel.PROGRESS)
         url = EUSERV_BASE_URL
         headers = {"user-agent": USER_AGENT, "Host": "support.euserv.com", "origin": "https://support.euserv.com"}
-        
+
         # 步骤 1: 选择订单
         data1 = {
             "Submit": "Extend contract", "sess_id": self.sess_id, "ord_no": order_id,
             "subaction": "choose_order", "choose_order_subaction": "show_contract_details",
         }
         self.session.post(url, headers=headers, data=data1, timeout=HTTP_TIMEOUT_SECONDS)
-        
+
         # 步骤 2: 触发密码框
         data2 = {
             "sess_id": self.sess_id, "subaction": "show_kc2_security_password_dialog",
             "prefix": "kc2_customer_contract_details_extend_contract_", "type": "1",
         }
         self.session.post(url, headers=headers, data=data2, timeout=HTTP_TIMEOUT_SECONDS)
-        
+
         # 步骤 3: 获取并提交 PIN
         pin = self._get_pin_from_gmail()
         data3 = {
@@ -580,14 +587,14 @@ class RenewalBot:
         }
         resp = self.session.post(url, headers=headers, data=data3, timeout=HTTP_TIMEOUT_SECONDS)
         resp.raise_for_status()
-        
+
         rs_json = resp.json()
         if rs_json.get("rs") != "success":
             raise RenewalError(f"Token 获取失败: {resp.text}")
-            
+
         token = rs_json["token"]["value"]
         self.log("成功获取续约 Token", LogLevel.SUCCESS)
-        
+
         # 步骤 4: 最终确认
         data4 = {
             "sess_id": self.sess_id, "ord_id": order_id,
@@ -595,14 +602,14 @@ class RenewalBot:
         }
         final_resp = self.session.post(url, headers=headers, data=data4, timeout=HTTP_TIMEOUT_SECONDS)
         final_resp.raise_for_status()
-        
+
         return True
 
     def _process_server_renewals(self, servers_to_renew: list) -> bool:
         """批量处理续期任务"""
         ids = [s['id'] for s in servers_to_renew]
         self.log(f"检测到需续期服务器: {ids}", LogLevel.INFO)
-        
+
         all_success = True
         for server in servers_to_renew:
             self.log(f"--- 正在续期服务器 {server['id']} ---", LogLevel.PROGRESS)
@@ -643,11 +650,12 @@ class RenewalBot:
 
         for i in range(max_retries + 1):
             try:
-                server_list = self._get_servers()
+                server_list = self._get_servers(debug=True)
             except Exception as e:
                 self.log(f"列表获取异常 (尝试 {i + 1}): {e}", LogLevel.WARNING)
 
             # 只要有任意一个服务器有了具体日期，就视为成功
+            self.log(f"DEBUG in _fetch_server_list_with_retry: {server_list}")
             has_valid_date = any(s.get('date') and s['date'] != "未知日期" for s in server_list)
 
             if has_valid_date:
@@ -737,7 +745,7 @@ class RenewalBot:
                 if not self._process_server_renewals(servers_to_renew):
                     status = "部分失败"
                     exit_code = EXIT_FAILURE
-                
+
                 # 强制刷新状态（含等待）
                 current_server_list = self._fetch_server_list_with_retry()
 
@@ -755,10 +763,12 @@ class RenewalBot:
 
         return exit_code
 
+
 def main() -> None:
     bot = RenewalBot()
     exit_code = bot.run()
     exit(exit_code)
+
 
 if __name__ == "__main__":
     main()
