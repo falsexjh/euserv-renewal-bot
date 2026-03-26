@@ -413,8 +413,8 @@ class RenewalBot:
 
         for attempt in range(LOGIN_MAX_RETRY_COUNT):
             self.current_login_attempt = attempt + 1
+            self.log(f"登录尝试 {attempt + 1}/{LOGIN_MAX_RETRY_COUNT} ...", LogLevel.PROGRESS)
             if attempt > 0:
-                self.log(f"登录尝试 {attempt + 1}/{LOGIN_MAX_RETRY_COUNT} ...", LogLevel.PROGRESS)
                 time.sleep(RETRY_DELAY_SECONDS)
 
             try:
@@ -536,7 +536,8 @@ class RenewalBot:
         resp = self.session.get(url=url, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
         resp.raise_for_status()
         if debug:
-            self.log(f"DEBUG in _get_servers: {resp.text}")
+            # self.log(f"DEBUG in _get_servers: {resp.text}")
+            self.log("DEBUG in _get_servers: [HTML output suppressed]")
         soup = BeautifulSoup(resp.text, "html.parser")
         selector = "#kc2_order_customer_orders_tab_content_1 .kc2_order_table.kc2_content_table tr, #kc2_order_customer_orders_tab_content_2 .kc2_order_table.kc2_content_table tr"
 
@@ -644,32 +645,31 @@ class RenewalBot:
         续期后带重试机制的列表获取。
         等待 Euserv 后端刷新日期（约需 1-3 分钟）。
         """
-        max_retries = 5
-        retry_interval = 30
-        server_list = []
+        self.log("续期完成，改为登出并重新登录后拉取服务器列表...", LogLevel.PROGRESS)
 
-        for i in range(max_retries + 1):
+        if self.session and self.sess_id:
             try:
-                server_list = self._get_servers(debug=True)
-            except Exception as e:
-                self.log(f"列表获取异常 (尝试 {i + 1}): {e}", LogLevel.WARNING)
+                logout_url = f"{EUSERV_BASE_URL}?sess_id={self.sess_id}&action=logout"
+                self.session.get(logout_url, headers={"user-agent": USER_AGENT}, timeout=HTTP_TIMEOUT_SECONDS)
+                self.log("已请求登出当前会话", LogLevel.PROGRESS)
+            except requests.RequestException as e:
+                self.log(f"登出请求失败，将直接重新登录: {e}", LogLevel.WARNING)
 
-            # 只要有任意一个服务器有了具体日期，就视为成功
-            self.log(f"DEBUG in _fetch_server_list_with_retry: {server_list}")
-            has_valid_date = any(s.get('date') and s['date'] != "未知日期" for s in server_list)
+        self._cleanup()
 
-            if has_valid_date:
-                if i > 0:
-                    self.log(f"在第 {i} 次重试后成功获取到续约日期。", LogLevel.SUCCESS)
-                return server_list
+        try:
+            self._perform_login()
+        except LoginError as e:
+            self.log(f"重新登录失败: {e}", LogLevel.ERROR)
+            return []
 
-            if i < max_retries:
-                self.log(f"等待页面更新日期... ({i + 1}/{max_retries}, 间隔 {retry_interval}s)", LogLevel.PROGRESS)
-                time.sleep(retry_interval)
-            else:
-                self.log("超时：页面仍未刷新下次续约日期，将使用默认调度。", LogLevel.WARNING)
-
-        return server_list
+        try:
+            server_list = self._get_servers(debug=True)
+            self.log(f"重新登录后获取到服务器数量: {len(server_list)}")
+            return server_list
+        except Exception as e:
+            self.log(f"重新登录后获取服务器列表失败: {e}", LogLevel.WARNING)
+            return []
 
     def _finalize_report_and_schedule(self, server_list: list[dict]) -> None:
         """
