@@ -1,7 +1,7 @@
 name: Euserv VPS Renewal
 on:
   schedule:
-    - cron: 0 0 26 7 *
+    - cron: 0 0 26 8 *
   workflow_dispatch: null
 jobs:
   renew-vps:
